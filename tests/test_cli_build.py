@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from dhow.cli.build import run_build, run_diff
-from dhow.cli.scaffold import scaffold_project
+from dhow_cli.build import run_build, run_diff
+from dhow_cli.scaffold import scaffold_project
 from dhow.core.project import Project
 
 

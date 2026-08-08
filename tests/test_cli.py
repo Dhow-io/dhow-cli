@@ -4,8 +4,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from dhow.cli.main import app
-from dhow.cli.scaffold import scaffold_project
+from dhow_cli.main import app
+from dhow_cli.scaffold import scaffold_project
 
 runner = CliRunner()
 

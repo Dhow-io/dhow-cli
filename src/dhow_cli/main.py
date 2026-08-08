@@ -10,7 +10,7 @@ from typing import Any
 
 import typer
 
-from dhow.cli.build import run_build, run_diff
+from dhow_cli.build import run_build, run_diff
 
 app = typer.Typer(help="Dhow — metadata-driven declarative ERP framework")
 new_app = typer.Typer(help="Create modules and DocTypes")
@@ -52,7 +52,7 @@ def init(
     json: bool = typer.Option(False, "--json", help="Emit JSON output"),
 ) -> None:
     """Scaffold a new Dhow project."""
-    from dhow.cli.scaffold import scaffold_project
+    from dhow_cli.scaffold import scaffold_project
 
     target = Path(path).resolve() / name
     result = scaffold_project(name, target)

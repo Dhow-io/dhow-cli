@@ -14,7 +14,9 @@ from dhow.core.project import Project
 from dhow.core.registry import Registry
 from dhow_cli.build import run_build, run_diff
 from dhow_cli.generate import run_generate_ui
+from dhow_cli.app_commands import load_app_commands, run_hook
 from dhow_cli.new import new_module
+from dhow_cli.workspace import discover_workspace, write_apps_list
 from dhow.core.layers import (
     Layer,
     LayerApplyError,
@@ -40,6 +42,8 @@ skill_app = typer.Typer(help="Inspect and render the project's Agent Skill libra
 app.add_typer(skill_app, name="skill")
 query_app = typer.Typer(help="Semantic queries + sandboxed text-to-SQL fallback")
 app.add_typer(query_app, name="query")
+attachments_app = typer.Typer(help="Inspect and download attachments from the metadata index")
+app.add_typer(attachments_app, name="attachments")
 
 
 def _new_doctype(project: Project, module: str, name: str) -> dict[str, Any]:
@@ -70,6 +74,18 @@ def _json_out(data: dict[str, Any]) -> None:
     typer.echo(json.dumps(data, indent=2, default=str))
 
 
+def _workspace() -> Workspace | None:
+    return discover_workspace()
+
+
+def _require_workspace() -> Workspace:
+    ws = discover_workspace()
+    if ws is None:
+        typer.echo("Not inside a Dhow workspace (missing apps/ and sites/ directories).")
+        raise typer.Exit(1)
+    return ws
+
+
 @app.command()
 def init(
     name: str,
@@ -85,6 +101,73 @@ def init(
         _json_out({"ok": True, "path": str(result), "name": name})
     else:
         typer.echo(f"Created Dhow project '{name}' at {result}")
+
+
+@app.command("init-workspace")
+def init_workspace(
+    name: str,
+    path: str = typer.Option(".", help="Directory in which to create the workspace"),
+    framework_url: str = typer.Option(
+        "https://github.com/Dhow-io/dhow.git",
+        "--framework-url",
+        help="Git URL for the Dhow framework",
+    ),
+    cli_url: str = typer.Option(
+        "https://github.com/Dhow-io/dhow-cli.git",
+        "--cli-url",
+        help="Git URL for the Dhow CLI",
+    ),
+    json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Create a Dhow workspace with apps/ and sites/ directories."""
+    from dhow_cli.workspace import Workspace, write_apps_list
+
+    root = Path(path).resolve() / name
+    apps = root / "apps"
+    sites = root / "sites"
+    apps.mkdir(parents=True, exist_ok=True)
+    sites.mkdir(parents=True, exist_ok=True)
+
+    ws = Workspace(
+        root=root,
+        apps_path=apps,
+        sites_path=sites,
+        config_path=root / "dhow.toml",
+        apps=["dhow"],
+        app_contracts={},
+    )
+    write_apps_list(ws, ["dhow"])
+
+    (root / "dhow.toml").write_text(
+        '[workspace]\nname = "' + name + '"\n\n[apps]\nrequired = ["dhow"]\n',
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text(
+        f"# {name}\n\nDhow workspace.\n\n"
+        "```bash\n"
+        f"cd {name}/apps\n"
+        f"git clone {framework_url}\n"
+        f"git clone {cli_url}\n"
+        "cd ..\n"
+        "dhow migrate\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    result = {
+        "ok": True,
+        "path": str(root),
+        "name": name,
+        "apps": ["dhow"],
+        "framework_url": framework_url,
+        "cli_url": cli_url,
+    }
+    if json:
+        _json_out(result)
+    else:
+        typer.echo(f"Created Dhow workspace '{name}' at {root}")
+        typer.echo(f"  apps: {apps}")
+        typer.echo(f"  sites: {sites}")
 
 
 @app.command()
@@ -716,7 +799,7 @@ def _attachments_db_url(project: Project) -> str | None:
 
 @app.command("attach")
 def attach_cmd(
-    file: Path = typer.Argument(..., help="Path to the file to attach", exists=True),
+    file: Path = typer.Argument(..., help="Path to the file to attach"),
     doctype: str = typer.Option(..., "--doctype", "-d", help="Owning DocType"),
     doc_id: str = typer.Option(..., "--doc-id", "-i", help="Owning document id"),
     field_name: str = typer.Option(
@@ -770,8 +853,34 @@ def attach_cmd(
                 typer.echo(msg["error"], err=True)
             raise typer.Exit(1)
         parsed_metadata = parsed
-
     resolved_key = key or f"{doctype.lower()}/{doc_id}/{file.name}"
+
+    if not file.exists():
+        msg = {
+            "ok": False,
+            "error": f"file not found: {file}",
+            "doctype": doctype,
+            "doc_id": doc_id,
+            "field": field_name,
+        }
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+    if not file.is_file():
+        msg = {
+            "ok": False,
+            "error": f"not a regular file: {file}",
+            "doctype": doctype,
+            "doc_id": doc_id,
+            "field": field_name,
+        }
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
 
     db_url = _attachments_db_url(project)
     if not db_url:
@@ -854,6 +963,174 @@ def attach_cmd(
         typer.echo(
             f"Attached {attachment.filename} ({attachment.size_bytes} bytes) to "
             f"{doctype}/{doc_id}.{field_name} (key={attachment.storage.key})"
+        )
+
+
+@attachments_app.command("list")
+def attachments_list_cmd(
+    doctype: str = typer.Option(..., "--doctype", "-d", help="DocType to list for"),
+    doc_id: str = typer.Option(..., "--doc-id", "-i", help="Document id to list for"),
+    field_name: str | None = typer.Option(
+        None, "--field", "-f", help="Optional: filter to a single attachment field"
+    ),
+    json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """List every attachment recorded for a ``(doctype, doc_id)`` pair."""
+    from dhow.attachments import AttachmentStore, LocalFileStorage
+
+    project = _project()
+    db_url = _attachments_db_url(project)
+    if not db_url:
+        msg = {
+            "ok": False,
+            "error": "no database URL configured for attachments",
+        }
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+
+    backend = LocalFileStorage(_attachments_root(project))
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.engine import Engine
+
+        engine: Engine = create_engine(db_url, future=True)
+    except Exception as exc:
+        msg = {"ok": False, "error": f"failed to create SQLAlchemy engine: {exc}"}
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+
+    def _provider():
+        return engine.connect()
+
+    _provider._dhow_is_engine = True  # type: ignore[attr-defined]
+    store = AttachmentStore(backend, _provider)
+    try:
+        store.ensure_schema()
+        rows = store.list(doctype, doc_id, field_name=field_name)
+    except Exception as exc:
+        msg = {"ok": False, "error": str(exc)}
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+
+    msg = {
+        "ok": True,
+        "doctype": doctype,
+        "doc_id": doc_id,
+        "count": len(rows),
+        "attachments": [r.to_dict() for r in rows],
+    }
+    if field_name is not None:
+        msg["field"] = field_name
+    if json:
+        _json_out(msg)
+    else:
+        if not rows:
+            typer.echo(f"No attachments for {doctype}/{doc_id}.")
+            return
+        typer.echo(f"{len(rows)} attachment(s) for {doctype}/{doc_id}:")
+        for row in rows:
+            typer.echo(
+                f"  - {row.id}  {row.filename}  ({row.size_bytes} B)  "
+                f"key={row.storage.key}  field={row.field_name}"
+            )
+
+
+@attachments_app.command("download")
+def attachments_download_cmd(
+    attachment_id: str = typer.Argument(..., help="Attachment id returned by `dhow attach`"),
+    output: Path = typer.Option(
+..., "-o", "--output", help="Destination path for the downloaded bytes"
+    ),
+    json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+) -> None:
+    """Download a single attachment to ``output``."""
+    from dhow.attachments import AttachmentStore, LocalFileStorage
+
+    project = _project()
+    db_url = _attachments_db_url(project)
+    if not db_url:
+        msg = {"ok": False, "error": "no database URL configured for attachments"}
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+
+    backend = LocalFileStorage(_attachments_root(project))
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.engine import Engine
+        from sqlalchemy import text as _sql_text
+
+        engine: Engine = create_engine(db_url, future=True)
+    except Exception as exc:
+        msg = {"ok": False, "error": f"failed to create SQLAlchemy engine: {exc}"}
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+
+    def _provider():
+        return engine.connect()
+
+    _provider._dhow_is_engine = True  # type: ignore[attr-defined]
+    store = AttachmentStore(backend, _provider)
+    try:
+        store.ensure_schema()
+        with engine.connect() as conn:
+            row = conn.execute(
+                _sql_text(
+                    "SELECT id, doctype, doc_id, field_name, storage_backend, "
+                    "storage_key, filename, content_type, size_bytes, "
+                    "checksum_sha256, metadata, created_at, tenant_id "
+                    "FROM dhow_attachment WHERE id = :id"
+                ),
+                {"id": attachment_id},
+            ).mappings().first()
+        if row is None:
+            msg = {"ok": False, "error": f"attachment not found: {attachment_id}"}
+            if json:
+                _json_out(msg)
+            else:
+                typer.echo(msg["error"], err=True)
+            raise typer.Exit(1)
+        from dhow.attachments import Attachment
+
+        attachment = Attachment.from_row(row)
+        data = store.download_attachment(attachment)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        msg = {"ok": False, "error": str(exc)}
+        if json:
+            _json_out(msg)
+        else:
+            typer.echo(msg["error"], err=True)
+        raise typer.Exit(1)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(data)
+    msg = {
+        "ok": True,
+        "id": attachment.id,
+        "filename": attachment.filename,
+        "path": str(output),
+        "size_bytes": len(data),
+    }
+    if json:
+        _json_out(msg)
+    else:
+        typer.echo(
+            f"Downloaded {attachment.filename} ({len(data)} bytes) to {output}"
         )
 
 
@@ -1377,7 +1654,17 @@ def query_explain_cmd(
         raise typer.Exit(1)
 
 
+def _register_app_commands() -> None:
+    """Discover installed Dhow apps and attach their CLI sub-apps."""
+    workspace = discover_workspace()
+    if workspace is None:
+        return
+    for app_name, group in load_app_commands(workspace).items():
+        app.add_typer(group, name=app_name)
+
+
 def main() -> None:
+    _register_app_commands()
     app()
 
 if __name__ == "__main__":
